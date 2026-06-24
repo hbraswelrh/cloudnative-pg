@@ -284,6 +284,13 @@ by the same actor who can write the Cluster, so it is not a security boundary.
 Kubernetes admission control still applies to the resulting Pods regardless of
 this annotation.
 
+The same reasoning applies to the `DatabaseRole` resource: its specification
+allows `superuser: true` and membership of any existing role through
+`inRoles`, including the `postgres` role itself. Write access to
+`DatabaseRole` objects in a namespace is therefore equivalent to superuser
+access on the PostgreSQL clusters in that namespace, and deserves the same
+care as write access to the `Cluster` resource.
+
 The RBAC discussed here governs access to CloudNativePG's own custom resources.
 The next section covers the complementary side: the RBAC that the operator
 itself relies on to manage Kubernetes resources on your behalf.
@@ -779,8 +786,45 @@ levels, as listed in the table below:
 | operator         | 9443        | webhook server      | `webhook-server` | Yes      | Yes            |
 | operator         | 8080        | metrics             | `metrics`        | No       | No             |
 | instance manager | 9187        | metrics             | `metrics`        | Optional | No             |
-| instance manager | 8000        | status              | `status`         | Yes      | No             |
+| instance manager | 8000        | status              | `status`         | Yes      | Partial (1)    |
 | operand          | 5432        | PostgreSQL instance | `postgresql`     | Optional | Yes            |
+
+(1) Status, health, and probe endpoints are unauthenticated. Sensitive
+endpoints (backup, `pg_controldata`, partial WAL archive, and instance-manager
+upgrade) require the operator's client certificate, as described in
+[Operator-to-instance authentication](#operator-to-instance-authentication)
+below.
+
+#### Operator-to-instance authentication
+
+The operator generates a self-signed ECDSA client certificate in memory at
+startup and publishes its SHA-256 public-key fingerprint in the cluster's
+`.status.operatorCertificateFingerprint`. The instance manager pins that
+fingerprint and rejects any call to its sensitive endpoints (backup,
+`pg_controldata`, partial WAL archive, and instance-manager upgrade) that does
+not present a matching certificate. Status, health, and probe endpoints remain
+unauthenticated.
+
+The certificate is never written to disk and is regenerated on every operator
+restart, so trust derives from fingerprint pinning rather than CA validation.
+
+This protection has a hard requirement: the status port **must** be served over
+TLS, which has been the default since v1.24. A client certificate can only be
+presented over a TLS connection, so the protected endpoints are reachable by the
+operator only when the status port uses TLS.
+
+:::warning
+If the status port is not served over TLS, the instance manager cannot
+authenticate the operator and **permanently** rejects every call to its
+protected endpoints (backup, `pg_controldata`, partial WAL archive, and
+instance-manager upgrade) with `401 Unauthorized`. This is not a transient
+condition and will not resolve on its own. It can affect instances created by an
+operator older than v1.24 (whose status port serves plain HTTP) once their
+instance manager is upgraded to a version that enforces this authentication: such
+instances must be rolled out so their Pods are recreated with a TLS-enabled status
+port. Newly created instances always enable TLS on the status port and are
+unaffected.
+:::
 
 ### PostgreSQL
 
@@ -848,6 +892,45 @@ For further detail on how `pg_ident.conf` is managed by the operator, see the
 
 :::info[Important]
     Examples assume that the Kubernetes cluster runs in a private and secure network.
+:::
+
+#### Schema resolution and `search_path` hardening
+
+A user with privileges on a database can plant objects (functions,
+operators, tables, or types) in a writable schema such as `public` and
+change the database- or role-level `search_path` (for example with
+`ALTER DATABASE ... SET search_path` or `ALTER ROLE ... SET
+search_path`). A privileged session that later connects to that database
+inherits the tenant-controlled `search_path`, so an unqualified
+reference in one of its queries could resolve to the planted object
+instead of the intended one. This is a privilege-escalation vector
+analogous to
+[CWE-426 (Untrusted Search Path)](https://cwe.mitre.org/data/definitions/426.html),
+and the same class of issue as the well-known
+[CVE-2018-1058](https://www.postgresql.org/support/security/CVE-2018-1058/).
+
+To prevent this, CloudNativePG pins the `search_path` on every
+connection it opens to PostgreSQL to a fixed value of
+`pg_catalog, public, pg_temp`, regardless of any `search_path`
+configured on the database or the connecting role:
+
+- `pg_catalog` is searched first, so a built-in object always takes
+  precedence over a same-named object planted in another schema;
+- `pg_temp` (the session-private temporary schema) is searched last
+  rather than first, so it cannot shadow relations or data types.
+
+In addition, the `SECURITY DEFINER` lookup function used by the
+PgBouncer integration is created with its own pinned `search_path`, and
+the monitoring queries run inside a transaction whose `search_path` is
+pinned as described in the ["Monitoring" page](monitoring.md).
+
+:::note
+User-authored SQL — `postInitSQL`/`postInitApplicationSQL`/`postInitTemplateSQL`
+during bootstrap, and the post-import queries of a logical import — runs
+with the standard `"$user", public` resolution so that it keeps behaving
+as it would in a plain PostgreSQL session. Schema-qualify object
+references in those scripts if you need them to be independent of the
+`search_path`.
 :::
 
 ### Storage

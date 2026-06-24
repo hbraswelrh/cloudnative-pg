@@ -46,6 +46,7 @@ BarmanCredentials
 BarmanObjectStoreConfiguration
 Bartolini
 Battiato
+BlaiseAntony
 BootstrapConfiguration
 BootstrapInitDB
 BootstrapPgBaseBackup
@@ -54,6 +55,7 @@ Buildx
 Burstable
 ByStatus
 CAs
+CEL
 CIDR
 CIS
 CKA
@@ -64,11 +66,13 @@ CONTAINERNAME
 CR's
 CRD
 CRDs
+CRLs
 CSI
 CSV
 CSVs
 CVE
 CVEs
+CWE
 CannotReconcile
 Canovai
 CatalogComponentImage
@@ -82,6 +86,9 @@ Certmanager
 CiliumNetworkPolicy
 ClassName
 ClientCASecret
+ClientCertificate
+ClientCertificateConfiguration
+ClientCertificateState
 ClientTLSSecret
 CloudNativePG
 CloudNativePG's
@@ -129,7 +136,15 @@ DatabaseObjectStatus
 DatabaseReclaimDelete
 DatabaseReclaimPolicy
 DatabaseReclaimRetain
+DatabaseRole
+DatabaseRoleList
+DatabaseRoleReclaimDelete
+DatabaseRoleReclaimPolicy
+DatabaseRoleReclaimRetain
 DatabaseRoleRef
+DatabaseRoleSpec
+DatabaseRoleStatus
+DatabaseRoles
 DatabaseSpec
 DatabaseStatus
 DefaultAzureCredential
@@ -155,6 +170,8 @@ EmbeddedObjectMetadata
 EnablePDB
 Endevir
 EndpointCA
+EndpointSlice
+EndpointSlices
 EnsureOption
 EnterpriseDB
 Enum
@@ -225,6 +242,7 @@ ImageInfo
 ImageVolume
 ImageVolumeSource
 ImportSource
+Infinoid
 InfoSec
 InstanceID
 InstanceReportedState
@@ -319,11 +337,13 @@ OpenSSL
 OpenShift
 Openshift
 OperatorCapabilities
+OperatorCertificateFingerprint
 OperatorHub
 OptionSpec
 OwnNamespace
 PDB
 PDBs
+PEM
 PGAudit
 PGDATA
 PGDG
@@ -389,6 +409,7 @@ PostInitSQLRefs
 PostInitTemplateSQLRefs
 Postgres
 PostgresConfiguration
+PrimaryLeaseConfiguration
 PrimaryUpdateMethod
 PrimaryUpdateMethodRestart
 PrimaryUpdateMethodSwitchover
@@ -421,6 +442,7 @@ PushSecret
 QoS
 QuickStart
 RBAC
+RCE
 README
 RHSA
 RLS
@@ -462,6 +484,7 @@ SHA
 SLA
 SLSA
 SPDX
+SPDY
 SPoF
 SQLQuery
 SQLRefs
@@ -480,6 +503,7 @@ Seccomp
 SeccompProfile
 SecretKeySelector
 SecretRefs
+SecretResourceVersion
 SecretStore
 SecretVersion
 SecretsResourceVersion
@@ -536,6 +560,8 @@ TLS
 TLSv
 TOC
 TODO
+TTL
+TTY
 TablespaceClassName
 TablespaceConfiguration
 TablespaceMapFile
@@ -545,6 +571,7 @@ TablespaceStatus
 TablespaceStatusPendingReconciliation
 TablespaceStatusReconciled
 Tablespaces
+TargetPGDataImageInfo
 TemporaryData
 TimelineId
 TopologyKey
@@ -557,6 +584,7 @@ URIs
 UTF
 Uncomment
 Unrealizable
+Untrusted
 UpdateStrategy
 UsageSpec
 UsageSpecType
@@ -580,6 +608,7 @@ WALs
 WalBackupConfiguration
 WalClassName
 Wallner
+WebSocket
 XXu
 YXBw
 YY
@@ -679,6 +708,7 @@ barmanObjectStore
 barmancloud
 barmanobjectstore
 barmanobjectstoreconfiguration
+bartscheers
 baseDN
 basebackup
 bb
@@ -698,6 +728,7 @@ bootstrapconfiguration
 bootstrapinitdb
 bootstrappgbasebackup
 bootstraprecovery
+boto
 bozkayasalihx
 br
 bs
@@ -731,8 +762,11 @@ cli
 clientCA
 clientCASecret
 clientCaSecretVersion
+clientCertificate
 clientTLS
 clientTLSSecret
+clientcertificateconfiguration
+clientcertificatestate
 cloudNativePGCommitHash
 cloudNativePGOperatorHash
 cloudnative
@@ -814,10 +848,17 @@ dataChecksums
 dataDurability
 databackupconfiguration
 databaseReclaimPolicy
+databaseRoleReclaimPolicy
 databaseobjectspec
 databaseobjectstatus
 databasereclaimpolicy
+databaserole
+databaserolelist
+databaserolereclaimpolicy
 databaseroleref
+databaseroles
+databaserolespec
+databaserolestatus
 databasespec
 databasestatus
 datacenter
@@ -834,6 +875,7 @@ de
 declaratively
 defaultMode
 demotionToken
+dennispidun
 deploymentStrategy
 dereference
 destinationPath
@@ -1011,6 +1053,7 @@ instancereportedstate
 instancesReportedState
 instancesStatus
 inuse
+invariants
 io
 ip
 ipcs
@@ -1023,6 +1066,7 @@ isolationcheckconfiguration
 isready
 issuecomment
 italy
+jaconi
 jdbc
 jmealo
 jobCount
@@ -1112,6 +1156,7 @@ maxParallel
 maxStandbyNamesFromCluster
 maxSyncReplicas
 maximumLag
+maxlengdell
 maxwait
 mcache
 md
@@ -1121,6 +1166,7 @@ memstats
 metav
 metric's
 metricsQueriesTTL
+mhartmann
 microservice
 microservices
 microsoft
@@ -1192,6 +1238,7 @@ passfile
 passthrough
 passwd
 passwordSecret
+passwordState
 passwordStatus
 passwordstate
 pc
@@ -1299,8 +1346,10 @@ preferredDuringSchedulingIgnoredDuringExecution
 prefetched
 preload
 prepended
+prepends
 primaryUpdateMethod
 primaryUpdateStrategy
+primaryleaseconfiguration
 primaryupdatemethod
 primaryupdatestrategy
 priorityClassName
@@ -1385,6 +1434,9 @@ ro
 robfig
 roleRef
 roleconfiguration
+rolelist
+rolespec
+rolestate
 rolestatus
 rollout
 rollouts
@@ -1412,6 +1464,7 @@ schemaspec
 sdk
 searchAttribute
 searchFilter
+sebv
 seccompProfile
 secretAccessKey
 secretKeyRef
@@ -1589,6 +1642,7 @@ unencrypted
 unfence
 unfencing
 unix
+unmanaged
 unsatisfiable
 unschedulable
 unsetting
