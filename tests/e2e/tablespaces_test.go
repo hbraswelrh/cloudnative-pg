@@ -22,7 +22,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -41,16 +40,18 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
 	"github.com/cloudnative-pg/cloudnative-pg/tests"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/config"
 	backupasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/backup"
 	clusterasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/cluster"
-	minioasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/minio"
+	objectstoreasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/objectstore"
 	pgasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/internal/resources"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/backups"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/clusterutils"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/exec"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/fencing"
-	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/minio"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/objects"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/objectstore"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/run"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/secrets"
@@ -73,16 +74,16 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 		namespacePrefix = "tablespaces"
 	)
 	var (
-		clusterName string
-		cluster     *apiv1.Cluster
+		clusterName      string
+		cluster          *apiv1.Cluster
+		storageClassName string
 	)
-
-	storageClassName := os.Getenv("E2E_DEFAULT_STORAGE_CLASS")
 
 	BeforeEach(func() {
 		if testLevelEnv.Depth < int(level) {
 			Skip("Test depth is lower than the amount requested for this test")
 		}
+		storageClassName = config.Current().Storage.StorageClass
 	})
 
 	clusterSetup := func(namespace, clusterManifest string) {
@@ -141,21 +142,21 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
 
-			// We create the MinIO credentials required to login into the system
-			By("creating the credentials for minio", func() {
+			// We create the object store credentials required to login into the system
+			By("creating the credentials for the object store", func() {
 				_, err = secrets.CreateObjectStorageSecret(
 					env.Ctx,
 					env.Client,
 					namespace,
 					"backup-storage-creds",
-					"minio",
-					"minio123",
+					objectstore.AccessKeyID,
+					objectstore.SecretAccessKey,
 				)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
-			By("create the certificates for MinIO", func() {
-				err := minioEnv.CreateCaSecret(env, namespace)
+			By("create the certificates for the object store", func() {
+				err := objectStoreEnv.CreateCaSecret(env, namespace)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
@@ -192,7 +193,7 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 				Expect(cluster.Spec.Tablespaces[0].Temporary).To(BeFalse())
 				updatedCluster := cluster.DeepCopy()
 				updatedCluster.Spec.Tablespaces[0].Temporary = true
-				err = env.Client.Patch(env.Ctx, updatedCluster, client.MergeFrom(cluster))
+				err = objects.Patch(env.Ctx, env.Client, updatedCluster, client.MergeFrom(cluster))
 				Expect(err).ToNot(HaveOccurred())
 
 				cluster = updatedCluster
@@ -220,7 +221,7 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 				backupasserts.AssertBackupConditionInClusterStatus(env, namespace, clusterName)
 			})
 
-			By("verifying the number of tars in minio", func() {
+			By("verifying the number of tars in the object store", func() {
 				latestBaseBackupContainsExpectedTars(clusterName, 1, 3)
 			})
 
@@ -303,7 +304,8 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 
 				// TODO: this is to force a CHECKPOINT when we run the backup on standby.
 				// This should be better handled inside Execute
-				minioasserts.AssertArchiveWalOnMinio(env, testTimeouts, minioEnv, namespace, clusterName, clusterName)
+				objectstoreasserts.AssertArchiveWalOnObjectStore(env, testTimeouts, objectStoreEnv,
+					namespace, clusterName, clusterName)
 
 				backupasserts.AssertBackupConditionInClusterStatus(env, namespace, clusterName)
 			})
@@ -342,9 +344,7 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 		})
 
 		It("can create the cluster by restoring from the object store", func() {
-			barmanBackupNameEnv := "BARMAN_BACKUP_NAME"
-			err := os.Setenv(barmanBackupNameEnv, fullBackupName)
-			Expect(err).ToNot(HaveOccurred())
+			config.SetTemplateVariable("BARMAN_BACKUP_NAME", fullBackupName)
 
 			const clusterRestoreFromBarmanManifest string = fixturesDir +
 				"/tablespaces/restore-cluster-from-barman.yaml.template"
@@ -401,21 +401,21 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
 
-			// We create the required credentials for MinIO
-			By("creating the credentials for minio", func() {
+			// We create the required credentials for the object store
+			By("creating the credentials for the object store", func() {
 				_, err = secrets.CreateObjectStorageSecret(
 					env.Ctx,
 					env.Client,
 					namespace,
 					"backup-storage-creds",
-					"minio",
-					"minio123",
+					objectstore.AccessKeyID,
+					objectstore.SecretAccessKey,
 				)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
-			By("create the certificates for MinIO", func() {
-				err := minioEnv.CreateCaSecret(env, namespace)
+			By("create the certificates for the object store", func() {
+				err := objectStoreEnv.CreateCaSecret(env, namespace)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
@@ -509,7 +509,8 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 
 				// TODO: this is to force a CHECKPOINT when we run the backup on standby.
 				// This should probably be moved elsewhere
-				minioasserts.AssertArchiveWalOnMinio(env, testTimeouts, minioEnv, namespace, clusterName, clusterName)
+				objectstoreasserts.AssertArchiveWalOnObjectStore(env, testTimeouts, objectStoreEnv,
+					namespace, clusterName, clusterName)
 
 				Eventually(func(g Gomega) {
 					backupList, err := backups.List(env.Ctx, env.Client, namespace)
@@ -543,8 +544,7 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 
 		It(fmt.Sprintf("can create the cluster by restoring from the backup %v using volume snapshot", backupName),
 			func() {
-				err = os.Setenv("BACKUP_NAME", backupName)
-				Expect(err).ToNot(HaveOccurred())
+				config.SetTemplateVariable("BACKUP_NAME", backupName)
 
 				clusterToRestoreName, err := yaml.GetResourceNameFromYAML(env.Scheme,
 					clusterVolumesnapshoRestoreManifest)
@@ -621,8 +621,7 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 						namespace, clusterName,
 					)
 					Expect(err).ToNot(HaveOccurred())
-					err = os.Setenv(recoveryTargetTimeEnv, recoveryTargetTime)
-					Expect(err).ToNot(HaveOccurred())
+					config.SetTemplateVariable(recoveryTargetTimeEnv, recoveryTargetTime)
 
 					// Insert 2 more rows which we expect not to be present at the end of the recovery
 					pgasserts.InsertRecordIntoTable(table1, 5, conn)
@@ -632,19 +631,20 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 					pgasserts.InsertRecordIntoTable(table2, 6, conn)
 
 					// Close and archive the current WAL file
-					minioasserts.AssertArchiveWalOnMinio(env, testTimeouts, minioEnv, namespace, clusterName, clusterName)
+					objectstoreasserts.AssertArchiveWalOnObjectStore(env, testTimeouts, objectStoreEnv,
+						namespace, clusterName, clusterName)
 				})
 				By("fetching the volume snapshots", func() {
 					snapshotList, err := getSnapshots(backupName, clusterName, namespace)
 					Expect(err).ToNot(HaveOccurred())
 					Expect(snapshotList.Items).To(HaveLen(len(backupObject.Status.BackupSnapshotStatus.Elements)))
 
-					envVars := storage.EnvVarsForSnapshots{
+					templateVars := storage.SnapshotTemplateVariables{
 						DataSnapshot:             snapshotDataEnv,
 						WalSnapshot:              snapshotWalEnv,
 						TablespaceSnapshotPrefix: snapshotTbsEnv,
 					}
-					err = storage.SetSnapshotNameAsEnv(&snapshotList, backupObject, envVars)
+					err = storage.SetSnapshotTemplateVariables(&snapshotList, backupObject, templateVars)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
@@ -845,7 +845,7 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 
 				updated := cluster.DeepCopy()
 				updated.Spec.PrimaryUpdateMethod = apiv1.PrimaryUpdateMethodSwitchover
-				err = env.Client.Patch(env.Ctx, updated, client.MergeFrom(cluster))
+				err = objects.Patch(env.Ctx, env.Client, updated, client.MergeFrom(cluster))
 				Expect(err).ToNot(HaveOccurred())
 			})
 			By("waiting for the cluster to be ready", func() {
@@ -871,7 +871,7 @@ var _ = Describe("Tablespaces tests", Label(tests.LabelTablespaces,
 						},
 					},
 				}
-				err = env.Client.Patch(env.Ctx, updated, client.MergeFrom(cluster))
+				err = objects.Patch(env.Ctx, env.Client, updated, client.MergeFrom(cluster))
 				Expect(err).ToNot(HaveOccurred())
 
 				cluster, err = clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
@@ -909,7 +909,7 @@ func addTablespaces(cluster *apiv1.Cluster, tbsSlice []apiv1.TablespaceConfigura
 	updated := cluster.DeepCopy()
 	updated.Spec.Tablespaces = append(updated.Spec.Tablespaces, tbsSlice...)
 
-	err := env.Client.Patch(env.Ctx, updated, client.MergeFrom(cluster))
+	err := objects.Patch(env.Ctx, env.Client, updated, client.MergeFrom(cluster))
 	Expect(err).ToNot(HaveOccurred())
 }
 
@@ -920,7 +920,7 @@ func updateTablespaceOwner(cluster *apiv1.Cluster, tablespaceName, newOwner stri
 			updated.Spec.Tablespaces[idx].Owner.Name = newOwner
 		}
 	}
-	err := env.Client.Patch(env.Ctx, updated, client.MergeFrom(cluster))
+	err := objects.Patch(env.Ctx, env.Client, updated, client.MergeFrom(cluster))
 	Expect(err).ToNot(HaveOccurred())
 }
 
@@ -1055,7 +1055,7 @@ func AssertClusterHasPvcsAndDataDirsForTablespaces(cluster *apiv1.Cluster, timeo
 	})
 	By("checking the data directory for the tablespaces is owned by postgres", func() {
 		Eventually(func(g Gomega) {
-			// minio may in the same namespace with cluster pod
+			// the object store may be in the same namespace as the cluster pod
 			pvcList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
 			g.Expect(err).ShouldNot(HaveOccurred())
 			for _, pod := range pvcList.Items {
@@ -1257,20 +1257,20 @@ func latestBaseBackupContainsExpectedTars(
 ) {
 	Eventually(func(g Gomega) {
 		// we list the backup.info files to get the listing of base backups
-		// directories in minio
+		// directories in the object store
 		backupInfoFiles := filepath.Join("*", clusterName, "base", "*", "*.info")
-		ls, err := minio.ListFiles(minioEnv, backupInfoFiles)
+		ls, err := objectstore.ListFiles(objectStoreEnv, backupInfoFiles)
 		g.Expect(err).ShouldNot(HaveOccurred())
 		frags := strings.Split(ls, "\n")
 		slices.Sort(frags)
 		report := fmt.Sprintf("directories:\n%s\n", strings.Join(frags, "\n"))
 		g.Expect(frags).To(HaveLen(numBackups), report)
 		latestBaseBackup := filepath.Dir(frags[numBackups-1])
-		tarsInLastBackup := strings.TrimPrefix(filepath.Join(latestBaseBackup, "*.tar"), "minio/")
-		listing, err := minio.ListFiles(minioEnv, tarsInLastBackup)
+		tarsInLastBackup := filepath.Join(latestBaseBackup, "*.tar")
+		listing, err := objectstore.ListFiles(objectStoreEnv, tarsInLastBackup)
 		g.Expect(err).ShouldNot(HaveOccurred())
 		report += fmt.Sprintf("tar listing:\n%s\n", listing)
-		numTars, err := minio.CountFiles(minioEnv, tarsInLastBackup)
+		numTars, err := objectstore.CountFiles(objectStoreEnv, tarsInLastBackup)
 		g.Expect(err).ShouldNot(HaveOccurred())
 		g.Expect(numTars).To(Equal(expectedTars), report)
 	}, 120).Should(Succeed())
@@ -1320,7 +1320,7 @@ func hibernateOn(
 		originCluster := cluster.DeepCopy()
 		cluster.Annotations[utils.HibernationAnnotationName] = hibernation.HibernationOn
 
-		err = crudClient.Patch(context.Background(), cluster, client.MergeFrom(originCluster))
+		err = objects.Patch(context.Background(), crudClient, cluster, client.MergeFrom(originCluster))
 		return err
 	default:
 		return fmt.Errorf("unknown method: %v", method)
@@ -1346,7 +1346,7 @@ func hibernateOff(
 		originCluster := cluster.DeepCopy()
 		cluster.Annotations[utils.HibernationAnnotationName] = hibernation.HibernationOff
 
-		err = crudClient.Patch(context.Background(), cluster, client.MergeFrom(originCluster))
+		err = objects.Patch(context.Background(), crudClient, cluster, client.MergeFrom(originCluster))
 		return err
 	default:
 		return fmt.Errorf("unknown method: %v", method)

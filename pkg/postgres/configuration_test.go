@@ -516,12 +516,8 @@ var _ = Describe("PostgreSQL Extensions", func() {
 				MajorVersion:       18,
 				IncludingMandatory: true,
 				AdditionalExtensions: []AdditionalExtensionConfiguration{
-					{
-						Name: "postgis",
-					},
-					{
-						Name: "pgvector",
-					},
+					{MountPath: ExtensionsBaseDirectory + "/postgis"},
+					{MountPath: ExtensionsBaseDirectory + "/pgvector"},
 				},
 			}
 			config := CreatePostgresqlConfiguration(info)
@@ -539,12 +535,8 @@ var _ = Describe("PostgreSQL Extensions", func() {
 					DynamicLibraryPath:   "/my/library/path",
 				},
 				AdditionalExtensions: []AdditionalExtensionConfiguration{
-					{
-						Name: "postgis",
-					},
-					{
-						Name: "pgvector",
-					},
+					{MountPath: ExtensionsBaseDirectory + "/postgis"},
+					{MountPath: ExtensionsBaseDirectory + "/pgvector"},
 				},
 			}
 			config := CreatePostgresqlConfiguration(info)
@@ -572,12 +564,12 @@ var _ = Describe("PostgreSQL Extensions", func() {
 				IncludingMandatory: true,
 				AdditionalExtensions: []AdditionalExtensionConfiguration{
 					{
-						Name:                 "geo",
+						MountPath:            ExtensionsBaseDirectory + "/geo",
 						ExtensionControlPath: []string{"postgis/share", "./pgrouting/share"},
 						DynamicLibraryPath:   []string{"postgis/lib/", "/pgrouting/lib/"},
 					},
 					{
-						Name:                 "utility",
+						MountPath:            ExtensionsBaseDirectory + "/utility",
 						ExtensionControlPath: []string{"pgaudit/share", "./pg-failover-slots/share"},
 						DynamicLibraryPath:   []string{"pgaudit/lib/", "/pg-failover-slots/lib/"},
 					},
@@ -586,6 +578,29 @@ var _ = Describe("PostgreSQL Extensions", func() {
 			config := CreatePostgresqlConfiguration(info)
 			Expect(config.GetConfig(ExtensionControlPath)).To(BeEquivalentTo("$system:" + sharePaths))
 			Expect(config.GetConfig(DynamicLibraryPath)).To(BeEquivalentTo("$libdir:" + libPaths))
+		})
+
+		It("skips paths that escape the extension directory instead of including them", func() {
+			// The webhook already rejects these at admission time; this
+			// guards callers that read the Cluster spec directly, without
+			// going through admission.
+			info := ConfigurationInfo{
+				Settings:           CnpgConfigurationSettings,
+				MajorVersion:       18,
+				IncludingMandatory: true,
+				AdditionalExtensions: []AdditionalExtensionConfiguration{
+					{
+						MountPath:            ExtensionsBaseDirectory + "/postgis",
+						ExtensionControlPath: []string{"share", "../../etc"},
+						DynamicLibraryPath:   []string{"lib", "../mount/lib"},
+					},
+				},
+			}
+			config := CreatePostgresqlConfiguration(info)
+			Expect(config.GetConfig(ExtensionControlPath)).
+				To(BeEquivalentTo("$system:" + ExtensionsBaseDirectory + "/postgis/share"))
+			Expect(config.GetConfig(DynamicLibraryPath)).
+				To(BeEquivalentTo("$libdir:" + ExtensionsBaseDirectory + "/postgis/lib"))
 		})
 	})
 })

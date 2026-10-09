@@ -82,6 +82,9 @@ func buildTestEnvironment() *testingEnvironment {
 		WithIndex(&apiv1.Backup{}, ".spec.cluster.name", func(rawObj client.Object) []string {
 			return []string{rawObj.(*apiv1.Backup).Spec.Cluster.Name}
 		}).
+		WithIndex(&apiv1.Backup{}, backupPhase, func(rawObj client.Object) []string {
+			return []string{string(rawObj.(*apiv1.Backup).Status.Phase)}
+		}).
 		Build()
 	Expect(err).ToNot(HaveOccurred())
 
@@ -327,7 +330,7 @@ func generateFakeClusterPods(
 	var pods []corev1.Pod
 	for idx < cluster.Spec.Instances {
 		idx++
-		pod, _ := specs.NewInstance(context.TODO(), *cluster, idx, true)
+		pod, _ := specs.NewInstance(context.TODO(), *cluster, idx)
 		cluster.SetInheritedDataAndOwnership(&pod.ObjectMeta)
 
 		err := c.Create(context.Background(), pod)
@@ -364,7 +367,8 @@ func generateFakeInitDBJobs(c client.Client, cluster *apiv1.Cluster) []batchv1.J
 	var jobs []batchv1.Job
 	for idx < cluster.Spec.Instances {
 		idx++
-		job := specs.CreatePrimaryJobViaInitdb(*cluster, idx)
+		cmd := specs.BuildPrimaryBootstrapCommandViaInitdb(*cluster)
+		job := specs.CreatePrimaryJob(*cluster, idx, cmd.Role, cmd.Command, nil)
 		cluster.SetInheritedDataAndOwnership(&job.ObjectMeta)
 
 		err := c.Create(context.Background(), job)

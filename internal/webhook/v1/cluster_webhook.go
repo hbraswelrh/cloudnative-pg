@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,7 +39,9 @@ import (
 	volumesnapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	validationutil "k8s.io/apimachinery/pkg/util/validation"
@@ -48,6 +51,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+	"github.com/cloudnative-pg/cloudnative-pg/internal/webhook/guard"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres/hba"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
@@ -68,6 +72,14 @@ func SetupClusterWebhookWithManager(mgr ctrl.Manager) error {
 		WithValidator(newBypassableValidator[*apiv1.Cluster](&ClusterCustomValidator{})).
 		WithDefaulter(&ClusterCustomDefaulter{}).
 		Complete()
+}
+
+// NewClusterAdmissionGuard creates a guard to protect a reconciliation loop.
+func NewClusterAdmissionGuard() *guard.Admission[*apiv1.Cluster] {
+	return &guard.Admission[*apiv1.Cluster]{
+		Defaulter: &ClusterCustomDefaulter{},
+		Validator: newBypassableValidator[*apiv1.Cluster](&ClusterCustomValidator{}),
+	}
 }
 
 // NOTE: The 'path' attribute must follow a specific pattern and should not be modified directly here.
@@ -98,7 +110,7 @@ type ClusterCustomValidator struct{}
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type Cluster.
 func (v *ClusterCustomValidator) ValidateCreate(_ context.Context, cluster *apiv1.Cluster) (admission.Warnings, error) {
-	clusterLog.Info("Validation for Cluster upon creation", "name", cluster.GetName(), "namespace",
+	clusterLog.Debug("Validation for Cluster upon creation", "name", cluster.GetName(), "namespace",
 		cluster.GetNamespace())
 
 	allErrs := v.validate(cluster)
@@ -118,7 +130,7 @@ func (v *ClusterCustomValidator) ValidateUpdate(
 	_ context.Context,
 	oldCluster *apiv1.Cluster, cluster *apiv1.Cluster,
 ) (admission.Warnings, error) {
-	clusterLog.Info("Validation for Cluster upon update", "name", cluster.GetName(), "namespace",
+	clusterLog.Debug("Validation for Cluster upon update", "name", cluster.GetName(), "namespace",
 		cluster.GetNamespace())
 
 	// applying defaults before validating updates to set any new default
@@ -202,6 +214,7 @@ func (v *ClusterCustomValidator) validate(r *apiv1.Cluster) (allErrs field.Error
 		v.validatePodSelectorRefs,
 		v.validateExtensions,
 		v.validateServiceAccountConfig,
+		v.validatePrimaryLease,
 	}
 
 	for _, validate := range validations {
@@ -1016,6 +1029,18 @@ func (v *ClusterCustomValidator) validateFailoverQuorum(r *apiv1.Cluster) field.
 	return result
 }
 
+// postgresParameterNameRegex matches a valid PostgreSQL configuration
+// parameter name: a plain GUC name or a custom (namespaced) one with a
+// single dot. Keys are rendered verbatim into postgresql.conf, so a
+// newline or other unexpected character could inject an arbitrary
+// directive.
+//
+// The pattern follows PostgreSQL's configuration-file lexer (guc-file.l),
+// including the dollar sign it allows in identifiers. It is intentionally
+// restricted to ASCII: the lexer also accepts high-bit bytes, but no real
+// GUC relies on them.
+var postgresParameterNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$`)
+
 // validateConfiguration determines whether a PostgreSQL configuration is valid
 func (v *ClusterCustomValidator) validateConfiguration(r *apiv1.Cluster) field.ErrorList {
 	var result field.ErrorList
@@ -1056,6 +1081,17 @@ func (v *ClusterCustomValidator) validateConfiguration(r *apiv1.Cluster) field.E
 	sanitizedParameters := postgres.CreatePostgresqlConfiguration(info).GetConfigurationParameters()
 
 	for key, value := range r.Spec.PostgresConfiguration.Parameters {
+		if !postgresParameterNameRegex.MatchString(key) {
+			result = append(
+				result,
+				field.Invalid(
+					field.NewPath("spec", "postgresql", "parameters", key),
+					key,
+					"must be a valid PostgreSQL configuration parameter name "+
+						"(a GUC name, optionally namespaced with a single dot)"))
+			continue
+		}
+
 		_, isFixed := postgres.FixedConfigurationParameters[key]
 		sanitizedValue, presentInSanitizedConfiguration := sanitizedParameters[key]
 		if isFixed && (!presentInSanitizedConfiguration || value != sanitizedValue) {
@@ -1576,6 +1612,58 @@ func (v *ClusterCustomValidator) validateMinSyncReplicas(r *apiv1.Cluster) field
 	return result
 }
 
+// validatePrimaryLease checks the consistency of the primary lease timings.
+// These mirror the invariants that client-go's leaderelection.NewLeaderElector
+// enforces at runtime: the lease duration must be strictly greater than the
+// renew deadline, and the renew deadline must be greater than the retry period
+// times the jitter factor. Rejecting violations here is important because a
+// combination that slips through admission would not "just" misbehave: it makes
+// NewLeaderElector return an error, which is fatal to the primary's lease
+// runnable and crash-loops the primary Pod.
+func (v *ClusterCustomValidator) validatePrimaryLease(r *apiv1.Cluster) field.ErrorList {
+	var result field.ErrorList
+
+	lease := r.Spec.PrimaryLease
+	if lease == nil {
+		return result
+	}
+
+	basePath := field.NewPath("spec", "primaryLease")
+
+	leaseDuration := apiv1.DefaultPrimaryLeaseDurationSeconds
+	if lease.LeaseDurationSeconds != nil {
+		leaseDuration = int(*lease.LeaseDurationSeconds)
+	}
+	renewDeadline := apiv1.DefaultPrimaryLeaseRenewDeadlineSeconds
+	if lease.RenewDeadlineSeconds != nil {
+		renewDeadline = int(*lease.RenewDeadlineSeconds)
+	}
+	retryPeriod := apiv1.DefaultPrimaryLeaseRetryPeriodSeconds
+	if lease.RetryPeriodSeconds != nil {
+		retryPeriod = int(*lease.RetryPeriodSeconds)
+	}
+
+	if leaseDuration <= renewDeadline {
+		result = append(result, field.Invalid(
+			basePath.Child("leaseDurationSeconds"),
+			leaseDuration,
+			"leaseDurationSeconds must be greater than renewDeadlineSeconds"))
+	}
+
+	// client-go rejects renewDeadline <= retryPeriod*JitterFactor (JitterFactor
+	// is 1.2). We replicate the check with exact integer arithmetic, since the
+	// fields are whole seconds: renewDeadline > 1.2*retryPeriod is equivalent to
+	// 5*renewDeadline > 6*retryPeriod.
+	if 5*renewDeadline <= 6*retryPeriod {
+		result = append(result, field.Invalid(
+			basePath.Child("renewDeadlineSeconds"),
+			renewDeadline,
+			"renewDeadlineSeconds must be greater than retryPeriodSeconds multiplied by 1.2"))
+	}
+
+	return result
+}
+
 func (v *ClusterCustomValidator) validateStorageSize(r *apiv1.Cluster) field.ErrorList {
 	return validateStorageConfigurationSize(*field.NewPath("spec", "storage"), r.Spec.StorageConfiguration)
 }
@@ -1869,13 +1957,51 @@ func (v *ClusterCustomValidator) validateExternalCluster(
 		externalCluster.BarmanObjectStore == nil &&
 		externalCluster.PluginConfiguration == nil {
 		result = append(result,
-			field.Invalid(
+			field.Required(
 				path,
-				externalCluster,
 				"one of connectionParameters, plugin and barmanObjectStore is required"))
 	}
 
+	// The external cluster name and the referenced secret selectors are joined
+	// into filesystem paths under the external secrets directory when the
+	// instance manager dumps the connection material, so they cannot contain a
+	// path separator or a parent-directory reference.
+	const pathComponentMsg = "cannot contain a path separator or a '..' component"
+	if isUnsafePathComponent(externalCluster.Name) {
+		result = append(result, field.Invalid(path.Child("name"), externalCluster.Name, pathComponentMsg))
+	}
+
+	selectors := []struct {
+		name     string
+		selector *corev1.SecretKeySelector
+	}{
+		{"sslCert", externalCluster.SSLCert},
+		{"sslKey", externalCluster.SSLKey},
+		{"sslRootCert", externalCluster.SSLRootCert},
+	}
+	for _, s := range selectors {
+		if s.selector == nil {
+			continue
+		}
+		if isUnsafePathComponent(s.selector.Name) {
+			result = append(result,
+				field.Invalid(path.Child(s.name, "name"), s.selector.Name, pathComponentMsg))
+		}
+		if isUnsafePathComponent(s.selector.Key) {
+			result = append(result,
+				field.Invalid(path.Child(s.name, "key"), s.selector.Key, pathComponentMsg))
+		}
+	}
+
 	return result
+}
+
+// isUnsafePathComponent reports whether a spec-provided value would escape the
+// directory it is meant to be joined into, either through a path separator or a
+// parent-directory reference. The instance manager enforces the same rule at the
+// write site, since it reads the spec directly and can bypass admission.
+func isUnsafePathComponent(value string) bool {
+	return value == "." || value == ".." || strings.ContainsAny(value, `/\`)
 }
 
 func (v *ClusterCustomValidator) validateReplicaClusterChange(r, old *apiv1.Cluster) field.ErrorList {
@@ -1989,17 +2115,15 @@ func (v *ClusterCustomValidator) validateReplicaMode(r *apiv1.Cluster) field.Err
 	hasEnabled := replicaClusterConf.Enabled != nil
 	hasPrimary := len(replicaClusterConf.Primary) > 0
 	if hasPrimary && hasEnabled {
-		result = append(result, field.Invalid(
+		result = append(result, field.Forbidden(
 			field.NewPath("spec", "replicaCluster", "enabled"),
-			replicaClusterConf,
 			"replica mode enabled is not compatible with the primary field"))
 	}
 
 	if r.IsReplica() {
 		if r.Spec.Bootstrap == nil {
-			result = append(result, field.Invalid(
+			result = append(result, field.Required(
 				field.NewPath("spec", "bootstrap"),
-				replicaClusterConf,
 				"bootstrap configuration is required for replica mode"))
 		} else if r.Spec.Bootstrap.PgBaseBackup == nil && r.Spec.Bootstrap.Recovery == nil &&
 			// this is needed because we only want to validate this during cluster creation, currently if we would have
@@ -2007,7 +2131,7 @@ func (v *ClusterCustomValidator) validateReplicaMode(r *apiv1.Cluster) field.Err
 			len(r.ResourceVersion) == 0 {
 			result = append(result, field.Invalid(
 				field.NewPath("spec", "replicaCluster"),
-				replicaClusterConf,
+				replicaClusterConf.Primary,
 				"replica mode bootstrap is compatible only with pg_basebackup or recovery"))
 		}
 	}
@@ -2540,7 +2664,9 @@ func (v *ClusterCustomValidator) getAdmissionWarnings(r *apiv1.Cluster) admissio
 	list = append(list, getStorageWarnings(r)...)
 	list = append(list, getSharedBuffersWarnings(r)...)
 	list = append(list, getMonitoringFieldsWarnings(r)...)
-	return append(list, getDeprecatedMonitoringFieldsWarnings(r)...)
+	list = append(list, getDeprecatedMonitoringFieldsWarnings(r)...)
+	list = append(list, getSynchronousReplicationWarnings(r)...)
+	return append(list, getFailureDomainTopologyWarnings(r)...)
 }
 
 func getMonitoringFieldsWarnings(r *apiv1.Cluster) admission.Warnings {
@@ -2626,7 +2752,7 @@ func getInTreeBarmanWarnings(r *apiv1.Cluster) admission.Warnings {
 		result = append(
 			result,
 			fmt.Sprintf("Native support for Barman Cloud backups and recovery is deprecated and will be "+
-				"completely removed in CloudNativePG 1.30.0. Found usage in: %s. "+
+				"completely removed in CloudNativePG 1.31.0. Found usage in: %s. "+
 				"Please migrate existing clusters to the new Barman Cloud Plugin to ensure a smooth transition.",
 				pathsStr),
 		)
@@ -2745,7 +2871,6 @@ func (v *ClusterCustomValidator) validatePodPatchAnnotation(r *apiv1.Cluster) fi
 		context.Background(),
 		*r,
 		1,
-		true,
 	); err != nil {
 		return field.ErrorList{
 			field.Invalid(
@@ -2851,7 +2976,15 @@ func (v *ClusterCustomValidator) validateExtensions(r *apiv1.Cluster) field.Erro
 				continue
 			}
 
-			if strings.HasPrefix(filepath.Clean(path), "..") {
+			// filepath.IsLocal reports whether the path, after joining it under
+			// "." and resolving "..", would stay within that base. Joining
+			// under "." first (rather than a placeholder mount point) makes
+			// this independent of the extension mount point's actual depth:
+			// CollectBinPaths and absolutizePaths join these paths under a
+			// real, multi-segment mount point at runtime, and a placeholder
+			// base shallower than that real path would wrongly accept some
+			// escaping paths (e.g. "../mount/lib").
+			if !filepath.IsLocal(filepath.Join(".", path)) {
 				result = append(result, field.Invalid(
 					fieldPath.Index(j),
 					path,
@@ -3011,4 +3144,51 @@ func (v *ClusterCustomValidator) validateServiceAccountConfig(r *apiv1.Cluster) 
 		}
 	}
 	return nil
+}
+
+func getSynchronousReplicationWarnings(r *apiv1.Cluster) admission.Warnings {
+	if r.Spec.Instances < 2 {
+		return nil
+	}
+
+	// A replica cluster replays data from another cluster: losing its
+	// designated primary doesn't lose data from the topology
+	if r.IsReplica() {
+		return nil
+	}
+
+	if r.Spec.PostgresConfiguration.Synchronous != nil {
+		return nil
+	}
+
+	if r.Spec.MinSyncReplicas > 0 {
+		return nil
+	}
+
+	return admission.Warnings{
+		"This cluster has no synchronous replication configured. " +
+			"A primary failure can cause data loss for transactions not yet replicated. " +
+			"Consider configuring .spec.postgresql.synchronous to protect against data loss.",
+	}
+}
+
+func getFailureDomainTopologyWarnings(r *apiv1.Cluster) admission.Warnings {
+	sync := r.Spec.PostgresConfiguration.Synchronous
+	if sync == nil || len(sync.FailureDomainKeys()) == 0 {
+		return nil
+	}
+
+	condition := meta.FindStatusCondition(
+		r.Status.Conditions,
+		string(apiv1.ConditionSyncReplicationTopologySatisfied),
+	)
+	if condition == nil || condition.Status != metav1.ConditionFalse {
+		return nil
+	}
+
+	return admission.Warnings{
+		"failure domain keys are configured but the topology constraint is not currently satisfied: " +
+			condition.Message +
+			" Check that replicas exist in different failure domains and that the topology labels are set.",
+	}
 }

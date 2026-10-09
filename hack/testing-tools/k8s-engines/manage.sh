@@ -41,7 +41,7 @@
 # Usage:
 #   manage.sh <action>
 #   where <action> can be: create, deploy, load-helper-images,
-#   print-image, export-logs, teardown, pyroscope, env
+#   plugin-barman-cloud, print-image, export-logs, teardown, pyroscope, env
 #
 # Environment Variables:
 #   CLUSTER_ENGINE - Determines the target vendor (default: 'kind')
@@ -74,7 +74,7 @@ source "${COMMON_DIR}/50-utils-images-load.sh"
 ACTION="${1:-}"
 
 if [ -z "$ACTION" ]; then
-    echo "Usage: $0 <create|deploy|load-helper-images|print-image|export-logs|teardown|pyroscope|env>"
+    echo "Usage: $0 <create|deploy|load-helper-images|plugin-barman-cloud|print-image|export-logs|teardown|pyroscope|env>"
     exit 1
 fi
 
@@ -184,6 +184,11 @@ case "$ACTION" in
         fi
         ;;
 
+    plugin-barman-cloud)
+        source "${COMMON_DIR}/20-utils-k8s.sh"
+        install_barman_cloud_plugin
+        ;;
+
     pyroscope)
         source "${COMMON_DIR}/20-utils-k8s.sh"
         deploy_pyroscope
@@ -222,7 +227,8 @@ case "$ACTION" in
         echo "CONTROLLER_IMG (default):   $(print_image)"
         echo "POSTGRES_IMG:               ${POSTGRES_IMG}"
         echo "E2E_PRE_ROLLING_UPDATE_IMG: ${E2E_PRE_ROLLING_UPDATE_IMG}"
-        echo "MINIO_IMG:                  ${MINIO_IMG}"
+        echo "RUSTFS_IMG:                 ${RUSTFS_IMG}"
+        echo "AWSCLI_IMG:                 ${AWSCLI_IMG}"
         echo "HELPER_IMGS count:          ${#HELPER_IMGS[@]}"
         echo "TEST_UPGRADE_TO_V1:         ${TEST_UPGRADE_TO_V1}"
 

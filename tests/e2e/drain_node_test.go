@@ -35,6 +35,7 @@ import (
 	replicationasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/replication"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/clusterutils"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/nodes"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/objects"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/pods"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/run"
@@ -462,8 +463,9 @@ var _ = Describe("E2E Drain Node", Serial, Label(tests.LabelDisruptive, tests.La
 				}, timeout).Should(BeEquivalentTo(3))
 			})
 
-			// Retrieve the names of the current pods. All of them should
-			// not exist anymore after the drain
+			// Retrieve the names of the current pods. After the drain
+			// they must come back with the exact same names: instance
+			// serials are reused, so pod identity (name) is stable.
 			var podsBeforeDrain []string
 			By("retrieving the current pods' names", func() {
 				podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
@@ -499,23 +501,16 @@ var _ = Describe("E2E Drain Node", Serial, Label(tests.LabelDisruptive, tests.La
 			// Expect pods to be recreated and to be ready
 			clusterasserts.AssertClusterIsReady(env, namespace, clusterName, testTimeouts[testsUtils.ClusterIsReady])
 
-			// Expect pods to be running on the uncordoned node and to have new names
-			By("verifying cluster pods changed names", func() {
+			By("verifying cluster pods kept their names", func() {
 				timeout := 600
 				Eventually(func(g Gomega) {
-					matchingNames := 0
 					podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
+					currentNames := make([]string, 0, len(podList.Items))
 					for _, pod := range podList.Items {
-						// compare the old pod list with the current pod names
-						for _, oldName := range podsBeforeDrain {
-							if pod.GetName() == oldName {
-								matchingNames++
-							}
-						}
+						currentNames = append(currentNames, pod.GetName())
 					}
-					g.Expect(len(podList.Items)).To(BeEquivalentTo(3))
-					g.Expect(matchingNames).To(BeEquivalentTo(0))
+					g.Expect(currentNames).To(ConsistOf(podsBeforeDrain))
 				}, timeout).Should(Succeed())
 			})
 
@@ -604,7 +599,7 @@ var _ = Describe("E2E Drain Node", Serial, Label(tests.LabelDisruptive, tests.La
 
 					updated := cluster.DeepCopy()
 					updated.Spec.EnablePDB = ptr.To(true)
-					err = env.Client.Patch(env.Ctx, updated, client.MergeFrom(cluster))
+					err = objects.Patch(env.Ctx, env.Client, updated, client.MergeFrom(cluster))
 					Expect(err).ToNot(HaveOccurred())
 				})
 

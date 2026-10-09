@@ -26,7 +26,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/tests"
 	backupasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/backup"
 	clusterasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/cluster"
-	minioasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/minio"
+	objectstoreasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/objectstore"
 	pgasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/internal/resources"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/backups"
@@ -45,7 +45,7 @@ var _ = Describe("Azure - Backup and restore", Label(tests.LabelBackupRestore), 
 	const (
 		tableName = "to_restore"
 	)
-	AzureConfiguration := backups.NewAzureConfigurationFromEnv()
+	var AzureConfiguration backups.AzureConfiguration
 
 	BeforeEach(func() {
 		if testLevelEnv.Depth < int(tests.High) {
@@ -54,6 +54,7 @@ var _ = Describe("Azure - Backup and restore", Label(tests.LabelBackupRestore), 
 		if !IsAKS() {
 			Skip("This test is only run on AKS clusters")
 		}
+		AzureConfiguration = backups.NewAzureConfiguration()
 	})
 
 	Context("using azure blobs as object storage with storage account access authentication", Ordered, func() {
@@ -232,7 +233,7 @@ var _ = Describe("Azure - Clusters Recovery From Barman Object Store", Label(tes
 	)
 
 	currentTimestamp := new(string)
-	AzureConfiguration := backups.NewAzureConfigurationFromEnv()
+	var AzureConfiguration backups.AzureConfiguration
 
 	BeforeEach(func() {
 		if testLevelEnv.Depth < int(level) {
@@ -241,6 +242,7 @@ var _ = Describe("Azure - Clusters Recovery From Barman Object Store", Label(tes
 		if !IsAKS() {
 			Skip("This test is only executed on AKS clusters")
 		}
+		AzureConfiguration = backups.NewAzureConfiguration()
 	})
 
 	// Restore cluster using a recovery object store, that is a backup of another cluster,
@@ -468,7 +470,7 @@ func assertArchiveWalOnAzureBlob(namespace, clusterName string, configuration ba
 	By("archiving WALs and verifying they exist", func() {
 		primary, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 		Expect(err).ToNot(HaveOccurred())
-		latestWAL := minioasserts.SwitchWalAndGetLatestArchive(env, primary.Namespace, primary.Name)
+		latestWAL := objectstoreasserts.SwitchWalAndGetLatestArchive(env, primary.Namespace, primary.Name)
 		// Define what file we are looking for in Azure.
 		// Escapes are required since az expects forward slashes to be escaped
 		path := fmt.Sprintf("wals\\/0000000100000000\\/%v.gz", latestWAL)
